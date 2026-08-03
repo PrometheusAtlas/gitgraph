@@ -61,7 +61,7 @@ async function loadBranches() {
 /* ---------------- layout helpers ---------------- */
 
 function dagLayout(nodes, edges) {
-  // y: level = distance from the tip set (parents are deeper)
+  // level = distance from the tip set (newest = level 0)
   const child = new Map();
   for (const e of edges) (child.get(e.target) ?? child.set(e.target, []).get(e.target)).push(e.source);
   const level = new Map();
@@ -82,21 +82,23 @@ function dagLayout(nodes, edges) {
     }
   }
   const maxLevel = Math.max(0, ...level.values());
-  const byLevel = new Map();
-  for (const n of nodes) {
-    const l = level.get(n.id) ?? 0;
-    (byLevel.get(l) ?? byLevel.set(l, []).get(l)).push(n);
-  }
-  const xs = {};
-  for (const [l, group] of byLevel) {
-    group.sort((a, b) => (a.branch === b.branch ? (a.date < b.date ? 1 : -1) : (a.branch < b.branch ? -1 : 1)));
-    group.forEach((n, i) => { xs[n.id] = (i - (group.length - 1) / 2) * 110 - l * 36; });
-  }
-  // newest (tips, level 0) at the BOTTOM, flowing left-to-right / top-to-bottom
+
+  // lanes: one per branch — main/master/develop first, then others alphabetically
+  const order = ["main", "master", "develop"];
+  const names = [...new Set(nodes.map((n) => n.branch).filter(Boolean))];
+  names.sort((a, b) => {
+    const ai = order.indexOf(a), bi = order.indexOf(b);
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+  });
+  const lane = new Map(names.map((nm, i) => [nm, i]));
+
+  // horizontal timeline: newest at the far right, older to the left;
+  // each branch is a parallel horizontal lane; merges are the diagonal joins
+  const nLanes = Math.max(1, names.length);
   return nodes.map((n) => ({
     id: n.id,
-    x: xs[n.id],
-    y: (maxLevel - (level.get(n.id) ?? 0)) * 66,
+    x: (maxLevel - (level.get(n.id) ?? 0)) * 120,
+    y: ((lane.get(n.branch) ?? 0) - (nLanes - 1) / 2) * 110,
   }));
 }
 
@@ -126,11 +128,11 @@ async function loadGraph() {
     {
       selector: "node",
       style: {
-        width: 26, height: 26, "background-color": "data(color)",
-        "border-width": 1.5, "border-color": "#0a0a10",
-        label: "data(msg)", "font-size": 10, "text-valign": "top",
-        "text-margin-y": 6, color: "#9a9aaa", "text-wrap": "ellipsis",
-        "text-max-width": 150,
+        width: 32, height: 32, "background-color": "data(color)",
+        "border-width": 2, "border-color": "#0a0a10",
+        label: "data(msg)", "font-size": 11, "text-valign": "top",
+        "text-margin-y": 7, color: "#9a9aaa", "text-wrap": "ellipsis",
+        "text-max-width": 170,
       },
     },
     { selector: "node.merged", style: { shape: "diamond", width: 20, height: 20 } },
@@ -142,11 +144,18 @@ async function loadGraph() {
   cy = cytoscape({
     container: $("cy"), elements: { nodes, edges }, style: styles,
     layout: { name: "preset" },   // honor the computed DAG positions
-    minZoom: 0.04, maxZoom: 4,
+    minZoom: 0.08, maxZoom: 4,
     wheelSensitivity: 0.2,
   });
   wireEvents();
+  // fit, but never land zoomed out to specks: floor the initial zoom
   cy.fit(undefined, 60);
+  if (cy.zoom() < 0.55) {
+    cy.zoom({
+      level: 0.55,
+      renderedPosition: { x: cy.width() * 0.6, y: cy.height() / 2 },
+    });
+  }
 }
 
 function wireEvents() {

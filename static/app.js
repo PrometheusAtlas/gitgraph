@@ -1,8 +1,7 @@
-/* gitgraph frontend — DAG + force views over the Neo4j commit graph. */
+/* gitgraph frontend — 3D graph over the Neo4j commit graph. */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-let cy = null;
 let current = { repo: "", branch: "" };
 const PALETTE = [
   "#5fd0a0", "#7ab8ff", "#f2b06b", "#d98fd9", "#ff8f8f",
@@ -58,135 +57,80 @@ async function loadBranches() {
   }
 }
 
-/* ---------------- layout helpers ---------------- */
+/* ---------------- 3D graph ---------------- */
 
-function dagLayout(nodes, edges) {
-  // level = distance from the tip set (newest = level 0)
-  const child = new Map();
-  for (const e of edges) (child.get(e.target) ?? child.set(e.target, []).get(e.target)).push(e.source);
-  const level = new Map();
-  const ids = new Set(nodes.map((n) => n.id));
-  const tips = nodes.filter((n) => !child.get(n.id)?.length);
-  const stack = tips.map((t) => t.id);
-  for (const t of stack) level.set(t, 0);
-  while (stack.length) {
-    const id = stack.pop();
-    const l = level.get(id) ?? 0;
-    for (const e of edges) {
-      if (e.source !== id) continue;
-      if (!ids.has(e.target)) continue;
-      if (!level.has(e.target) || level.get(e.target) < l + 1) {
-        level.set(e.target, l + 1);
-        stack.push(e.target);
-      }
-    }
-  }
-  const maxLevel = Math.max(0, ...level.values());
-
-  // lanes: one per branch — main/master/develop first, then others alphabetically
-  const order = ["main", "master", "develop"];
-  const names = [...new Set(nodes.map((n) => n.branch).filter(Boolean))];
-  names.sort((a, b) => {
-    const ai = order.indexOf(a), bi = order.indexOf(b);
-    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+const Graph = ForceGraph3D()(document.getElementById("cy"))
+  .backgroundColor("#12121a")
+  .nodeRelSize(6)
+  .nodeVal((n) => (n.merged ? 1.6 : 1))
+  .nodeColor((n) => n.color)
+  .nodeLabel((n) =>
+    `<b>${esc(n.msg)}</b><br>${esc(n.author)} · ${shortDate(n.date)}<br>` +
+    `+${n.add ?? "?"} −${n.del ?? "?"} · ${n.files ?? "?"} files` +
+    (n.merged ? " · MERGE" : "") + (n.branch ? ` · ${esc(n.branch)}` : "") +
+    `<br>${n.id.slice(0, 12)}…`)
+  .linkColor(() => "#4a4a5c")
+  .linkWidth(1.2)
+  .linkDirectionalParticles(2)
+  .linkDirectionalParticleWidth(2)
+  .linkDirectionalParticleColor((l) => (l.source && l.source.color) || "#7ab8ff")
+  .linkLabel((l) =>
+    `<i>${esc(l.source.msg)}</i><br>${esc(l.source.author)} · ${shortDate(l.source.date)}`)
+  .onNodeClick((n) => showPanel(n.id))
+  .onNodeHover((n) => {
+    document.body.style.cursor = n ? "pointer" : "default";
+  })
+  .nodeThreeObject((n) => {
+    const THREE = window.THREE;
+    const group = new THREE.Group();
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(n.merged ? 4.5 : 3.4, 16, 16),
+      new THREE.MeshLambertMaterial({ color: n.color }));
+    group.add(sphere);
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    const text = n.msg.slice(0, 26);
+    ctx.font = "600 13px 'DejaVu Sans Mono', monospace";
+    const w = Math.max(90, ctx.measureText(text).width + 14);
+    canvas.width = w * 2; canvas.height = 44;
+    ctx.scale(2, 2);
+    ctx.font = "600 13px 'DejaVu Sans Mono', monospace";
+    ctx.fillStyle = "rgba(18,18,26,0.88)";
+    ctx.fillRect(0, 0, w, 22);
+    ctx.strokeStyle = n.color;
+    ctx.strokeRect(0.5, 0.5, w - 1, 21);
+    ctx.fillStyle = "#e8e8ee";
+    ctx.fillText(text, 7, 15);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.minFilter = THREE.LinearFilter;
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+    sprite.scale.set(w * 0.015, 22 * 0.015, 1);
+    sprite.position.y = 6;
+    group.add(sprite);
+    return group;
   });
-  const lane = new Map(names.map((nm, i) => [nm, i]));
-
-  // horizontal timeline: newest at the far right, older to the left;
-  // each branch is a parallel horizontal lane; merges are the diagonal joins
-  const nLanes = Math.max(1, names.length);
-  return nodes.map((n) => ({
-    id: n.id,
-    x: (maxLevel - (level.get(n.id) ?? 0)) * 120,
-    y: ((lane.get(n.branch) ?? 0) - (nLanes - 1) / 2) * 110,
-  }));
-}
-
-/* ---------------- graph rendering ---------------- */
 
 async function loadGraph() {
   const url = `/api/graph?repo=${encodeURIComponent(current.repo)}` +
     (current.branch ? `&branch=${encodeURIComponent(current.branch)}` : "") + "&limit=2500";
   const data = await jget(url);
-  const positions = dagLayout(data.nodes, data.edges);
-  const pos = new Map(positions.map((p) => [p.id, p]));
   const nodes = data.nodes.map((n) => ({
-    data: {
-      id: n.id, msg: n.msg, author: n.author, date: n.date,
-      branch: n.branch, merged: n.merged, tags: n.tags,
-      add: n.add, del: n.del, files: n.files,
-      color: n.branch ? branchColor(n.branch) : "#6a6a7a",
-    },
-    position: { x: pos.get(n.id)?.x ?? 0, y: pos.get(n.id)?.y ?? 0 },
-    classes: `${n.merged ? "merged" : ""} ${n.tags?.length ? "tagged" : ""}`,
+    id: n.id,
+    msg: n.msg,
+    author: n.author,
+    date: n.date,
+    branch: n.branch,
+    merged: n.merged,
+    tags: n.tags,
+    add: n.add, del: n.del, files: n.files,
+    color: n.branch ? branchColor(n.branch) : "#6a6a7a",
   }));
-  const edges = data.edges.map((e) => ({
-    // flip: arrows point TOWARD the newer commit (bottom-right flow)
-    data: { id: `${e.target}->${e.source}`, source: e.target, target: e.source },
-  }));
-  const styles = [
-    {
-      selector: "node",
-      style: {
-        width: 32, height: 32, "background-color": "data(color)",
-        "border-width": 2, "border-color": "#0a0a10",
-        label: "data(msg)", "font-size": 11, "text-valign": "top",
-        "text-margin-y": 7, color: "#9a9aaa", "text-wrap": "ellipsis",
-        "text-max-width": 170,
-      },
-    },
-    { selector: "node.merged", style: { shape: "diamond", width: 20, height: 20 } },
-    { selector: "node.tagged", style: { shape: "hexagon", "border-width": 3, "border-color": "#e0d27a" } },
-    { selector: "node:selected", style: { "border-width": 3, "border-color": "#ffffff" } },
-    { selector: "edge", style: { width: 1.6, "line-color": "#4a4a5c", "curve-style": "bezier", "target-arrow-shape": "triangle", "target-arrow-color": "#4a4a5c", "arrow-scale": 0.7 } },
-  ];
-  if (cy) cy.destroy();
-  cy = cytoscape({
-    container: $("cy"), elements: { nodes, edges }, style: styles,
-    layout: { name: "preset" },   // honor the computed DAG positions
-    minZoom: 0.08, maxZoom: 4,
-    wheelSensitivity: 0.2,
-  });
-  wireEvents();
-  // fit, but never land zoomed out to specks: floor the initial zoom
-  cy.fit(undefined, 60);
-  if (cy.zoom() < 0.55) {
-    cy.zoom({
-      level: 0.55,
-      renderedPosition: { x: cy.width() * 0.6, y: cy.height() / 2 },
-    });
-  }
+  const links = data.edges.map((e) => ({ source: e.target, target: e.source }));
+  Graph.graphData({ nodes, links });
+  Graph.onEngineStop(() => Graph.zoomToFit(400, 60));
 }
 
-function wireEvents() {
-  const tip = $("tooltip");
-  cy.on("mouseover", "node", (ev) => {
-    const n = ev.target;
-    const d = n.data();
-    tip.innerHTML =
-      `<div class="tt-msg">${esc(d.msg)}</div>` +
-      `<div class="tt-row">${d.author} · ${shortDate(d.date)}</div>` +
-      `<div class="tt-row">+${d.add} −${d.del} · ${d.files} files${d.merged ? " · MERGE" : ""}${d.tags?.length ? " · " + d.tags.join(",") : ""}</div>` +
-      (d.branch ? `<div class="tt-row" style="color:${d.color}">◆ ${d.branch}</div>` : "") +
-      `<div class="tt-row hash">${d.id.slice(0, 12)}…</div>`;
-    tip.hidden = false;
-  });
-  cy.on("mouseover", "edge", (ev) => {
-    const src = cy.getElementById(ev.target.data("source")).data();
-    tip.innerHTML = `<div class="tt-edge">↑ ${esc(src.msg)}</div>` +
-      `<div class="tt-row">${src.author} · ${shortDate(src.date)}</div>` +
-      `<div class="tt-row">${src.id.slice(0, 12)}…</div>`;
-    tip.hidden = false;
-  });
-  cy.on("mouseout", "node edge", () => { tip.hidden = true; });
-  cy.on("mousemove", (ev) => {
-    const r = $("cy").getBoundingClientRect();
-    tip.style.left = ev.originalEvent.clientX - r.left + 14 + "px";
-    tip.style.top = ev.originalEvent.clientY - r.top + 14 + "px";
-  });
-  cy.on("tap", "node", (ev) => showPanel(ev.target.id()));
-  cy.on("tap", (ev) => { if (ev.target === cy) $("panel").hidden = true; });
-}
+/* ---------------- commit panel ---------------- */
 
 async function showPanel(hash) {
   const d = await jget(`/api/node/${hash}`);
@@ -241,28 +185,11 @@ document.addEventListener("click", (e) => {
 });
 
 function focusNode(hash) {
-  const n = cy.getElementById(hash);
-  if (n.length) { cy.animate({ center: { eles: n }, zoom: 0.9, duration: 400 }); n.animate({ style: { "border-width": 4, "border-color": "#ffffff" }, duration: 1500 }); }
-  else showPanel(hash);
-}
-
-/* ---------------- views ---------------- */
-
-$("view-dag").addEventListener("click", () => { setView("dag"); });
-$("view-force").addEventListener("click", () => { setView("force"); });
-function setView(v) {
-  $("view-dag").classList.toggle("on", v === "dag");
-  $("view-force").classList.toggle("on", v === "force");
-  if (v === "dag") loadGraph();
-  else {
-    cy.nodes().style("font-size", 7);
-    cy.layout({
-      name: "cose", animate: true, animationDuration: 700,
-      nodeRepulsion: 24000, idealEdgeLength: 220, edgeElasticity: 90,
-      gravity: 0.25, numIter: 1500, randomize: true,
-    }).run();
-    cy.one("layoutstop", () => cy.fit(undefined, 80));
+  const n = Graph.graphData().nodes.find((x) => x.id === hash);
+  if (n) {
+    Graph.cameraPosition({ x: n.x * 1.4, y: n.y * 1.4, z: n.z * 1.4 + 120 }, n, 1500);
   }
+  showPanel(hash);
 }
 
 $("repo").addEventListener("change", () => {

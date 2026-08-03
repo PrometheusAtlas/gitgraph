@@ -40,6 +40,16 @@ main { flex: 1; position: relative; min-height: 0; }
 #cy { position: absolute; inset: 0; }
 #cy .cy-msg { font: 11px "DejaVu Sans Mono", monospace; }
 
+#legend {
+  position: absolute; left: 14px; bottom: 14px; z-index: 15;
+  background: rgba(18, 18, 26, 0.9); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px 12px; font-size: 12px;
+  min-width: 190px;
+}
+.lg-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.lg-dot { width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0; }
+.lg-count { margin-left: auto; color: var(--dim); }
+
 #tooltip {
   position: absolute; z-index: 30; pointer-events: none;
   background: var(--panel); border: 1px solid var(--accent);

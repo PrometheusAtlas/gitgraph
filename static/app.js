@@ -7,8 +7,10 @@ const PALETTE = [
   "#5fd0a0", "#7ab8ff", "#f2b06b", "#d98fd9", "#ff8f8f",
   "#8fd9d9", "#e0d27a", "#a0e07a", "#d9a05f", "#9fa8ff",
 ];
-const branchColor = (() => { const m = new Map(); let i = 0;
-  return (b) => { if (!m.has(b)) m.set(b, PALETTE[i++ % PALETTE.length]); return m.get(b); }; })();
+const colorFor = (() => { const m = new Map(); let i = 0;
+  return (k) => { if (!m.has(k)) m.set(k, PALETTE[i++ % PALETTE.length]); return m.get(k); }; })();
+const branchColor = (b) => colorFor("b:" + b);
+const authorColor = (a) => colorFor("a:" + a);
 
 async function jget(url) {
   const r = await fetch(url);
@@ -59,9 +61,51 @@ async function loadBranches() {
 
 /* ---------------- 3D graph ---------------- */
 
+function layout3d(nodes, edges) {
+  // levels: distance from the tip set (newest = level 0)
+  const child = new Map();
+  for (const e of edges) (child.get(e.target) ?? child.set(e.target, []).get(e.target)).push(e.source);
+  const level = new Map();
+  const ids = new Set(nodes.map((n) => n.id));
+  const tips = nodes.filter((n) => !child.get(n.id)?.length);
+  const stack = tips.map((t) => t.id);
+  for (const t of stack) level.set(t, 0);
+  while (stack.length) {
+    const id = stack.pop();
+    const l = level.get(id) ?? 0;
+    for (const e of edges) {
+      if (e.source !== id) continue;
+      if (!ids.has(e.target)) continue;
+      if (!level.has(e.target) || level.get(e.target) < l + 1) {
+        level.set(e.target, l + 1);
+        stack.push(e.target);
+      }
+    }
+  }
+  const maxLevel = Math.max(0, ...level.values());
+
+  // structured space: time on X, branches on Y, authors on Z
+  const order = ["main", "master", "develop"];
+  const branches = [...new Set(nodes.map((n) => n.branch).filter(Boolean))];
+  branches.sort((a, b) => {
+    const ai = order.indexOf(a), bi = order.indexOf(b);
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+  });
+  const authors = [...new Set(nodes.map((n) => n.author).filter(Boolean))].sort();
+  const bLane = new Map(branches.map((b, i) => [b, i]));
+  const aLane = new Map(authors.map((a, i) => [a, i]));
+  const HS = 100, BS = 150, AS = 180;
+  const pos = new Map(nodes.map((n) => [n.id, {
+    x: (maxLevel - (level.get(n.id) ?? 0)) * HS,
+    y: ((bLane.get(n.branch) ?? 0) - (branches.length - 1) / 2) * BS,
+    z: ((aLane.get(n.author) ?? 0) - (authors.length - 1) / 2) * AS,
+  }]));
+  return { pos, maxLevel, branches, authors };
+}
+
 const Graph = ForceGraph3D()(document.getElementById("cy"))
   .backgroundColor("#12121a")
-  .nodeRelSize(6)
+  .nodeRelSize(5)
   .nodeVal((n) => (n.merged ? 1.6 : 1))
   .nodeColor((n) => n.color)
   .nodeLabel((n) =>
@@ -80,32 +124,37 @@ const Graph = ForceGraph3D()(document.getElementById("cy"))
   .onNodeHover((n) => {
     document.body.style.cursor = n ? "pointer" : "default";
   })
+  .d3AlphaDecay(1)   // sim settles instantly: the structured layout holds
   .nodeThreeObject((n) => {
     const THREE = window.THREE;
     const group = new THREE.Group();
     const sphere = new THREE.Mesh(
-      new THREE.SphereGeometry(n.merged ? 4.5 : 3.4, 16, 16),
+      new THREE.SphereGeometry(n.merged ? 4.6 : 3.4, 16, 16),
       new THREE.MeshLambertMaterial({ color: n.color }));
     group.add(sphere);
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
     const text = n.msg.slice(0, 26);
+    const who = n.author || "";
     ctx.font = "600 13px 'DejaVu Sans Mono', monospace";
-    const w = Math.max(90, ctx.measureText(text).width + 14);
-    canvas.width = w * 2; canvas.height = 44;
+    const w = Math.max(100, ctx.measureText(text).width + 14);
+    canvas.width = w * 2; canvas.height = 66;
     ctx.scale(2, 2);
     ctx.font = "600 13px 'DejaVu Sans Mono', monospace";
     ctx.fillStyle = "rgba(18,18,26,0.88)";
-    ctx.fillRect(0, 0, w, 22);
+    ctx.fillRect(0, 0, w, 33);
     ctx.strokeStyle = n.color;
-    ctx.strokeRect(0.5, 0.5, w - 1, 21);
+    ctx.strokeRect(0.5, 0.5, w - 1, 32);
     ctx.fillStyle = "#e8e8ee";
     ctx.fillText(text, 7, 15);
+    ctx.font = "600 10px 'DejaVu Sans Mono', monospace";
+    ctx.fillStyle = n.color;
+    ctx.fillText(who, 7, 28);
     const tex = new THREE.CanvasTexture(canvas);
     tex.minFilter = THREE.LinearFilter;
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
-    sprite.scale.set(w * 0.015, 22 * 0.015, 1);
-    sprite.position.y = 6;
+    sprite.scale.set(w * 0.015, 33 * 0.015, 1);
+    sprite.position.y = 7;
     group.add(sprite);
     return group;
   });
@@ -123,12 +172,49 @@ async function loadGraph() {
     merged: n.merged,
     tags: n.tags,
     add: n.add, del: n.del, files: n.files,
-    color: n.branch ? branchColor(n.branch) : "#6a6a7a",
+    color: authorColor(n.author || "?"),
   }));
   const links = data.edges.map((e) => ({ source: e.target, target: e.source }));
+  const L = layout3d(nodes, links);
+
+  // deterministic structured space: time on X, branches on Y, authors on Z.
+  // preset coordinates + d3AlphaDecay(1) means the sim never pulls it apart.
+  for (const n of nodes) {
+    const p = L.pos.get(n.id);
+    n.x = p.x; n.y = p.y; n.z = p.z;
+  }
+
   Graph.graphData({ nodes, links });
-  Graph.onEngineStop(() => Graph.zoomToFit(400, 60));
+  Graph.onEngineStop(() => {
+    // frame the space from a 3/4 angle — you're in the space, not staring at its center
+    const xs = nodes.map((n) => L.pos.get(n.id).x);
+    const maxX = Math.max(...xs);
+    Graph.cameraPosition(
+      { x: maxX * 0.55, y: -maxX * 0.42, z: maxX * 0.62 },
+      { x: maxX * 0.45, y: 0, z: 0 }, 900);
+  });
+  renderLegend(L.authors, nodes);
 }
+
+function renderLegend(authors, nodes) {
+  const counts = {};
+  for (const n of nodes) counts[n.author] = (counts[n.author] || 0) + 1;
+  const box = $("legend");
+  box.innerHTML = authors.length
+    ? authors.map((a) =>
+        `<div class="lg-row"><span class="lg-dot" style="background:${authorColor(a)}"></span>` +
+        `${esc(a)}<span class="lg-count">${counts[a] ?? 0}</span></div>`).join("")
+    : '<div class="lg-row" style="color:var(--dim)">no authors</div>';
+  box.hidden = !authors.length;
+}
+
+// smooth camera: damping + a gentle drift that stops the moment you interact
+const ctrl = Graph.controls();
+ctrl.enableDamping = true;
+ctrl.dampingFactor = 0.08;
+ctrl.autoRotate = true;
+ctrl.autoRotateSpeed = 0.5;
+ctrl.addEventListener("start", () => { ctrl.autoRotate = false; });
 
 /* ---------------- commit panel ---------------- */
 

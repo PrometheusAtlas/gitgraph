@@ -81,6 +81,7 @@ function dagLayout(nodes, edges) {
       }
     }
   }
+  const maxLevel = Math.max(0, ...level.values());
   const byLevel = new Map();
   for (const n of nodes) {
     const l = level.get(n.id) ?? 0;
@@ -89,9 +90,14 @@ function dagLayout(nodes, edges) {
   const xs = {};
   for (const [l, group] of byLevel) {
     group.sort((a, b) => (a.branch === b.branch ? (a.date < b.date ? 1 : -1) : (a.branch < b.branch ? -1 : 1)));
-    group.forEach((n, i) => { xs[n.id] = (i - (group.length - 1) / 2) * 120; });
+    group.forEach((n, i) => { xs[n.id] = (i - (group.length - 1) / 2) * 110 - l * 36; });
   }
-  return nodes.map((n) => ({ id: n.id, x: xs[n.id], y: -(level.get(n.id) ?? 0) * 70 }));
+  // newest (tips, level 0) at the BOTTOM, flowing left-to-right / top-to-bottom
+  return nodes.map((n) => ({
+    id: n.id,
+    x: xs[n.id],
+    y: (maxLevel - (level.get(n.id) ?? 0)) * 66,
+  }));
 }
 
 /* ---------------- graph rendering ---------------- */
@@ -113,7 +119,8 @@ async function loadGraph() {
     classes: `${n.merged ? "merged" : ""} ${n.tags?.length ? "tagged" : ""}`,
   }));
   const edges = data.edges.map((e) => ({
-    data: { id: `${e.source}->${e.target}`, source: e.source, target: e.target },
+    // flip: arrows point TOWARD the newer commit (bottom-right flow)
+    data: { id: `${e.target}->${e.source}`, source: e.target, target: e.source },
   }));
   const styles = [
     {
@@ -132,9 +139,14 @@ async function loadGraph() {
     { selector: "edge", style: { width: 1.6, "line-color": "#4a4a5c", "curve-style": "bezier", "target-arrow-shape": "triangle", "target-arrow-color": "#4a4a5c", "arrow-scale": 0.7 } },
   ];
   if (cy) cy.destroy();
-  cy = cytoscape({ container: $("cy"), elements: { nodes, edges }, style: styles, minZoom: 0.2, maxZoom: 3 });
+  cy = cytoscape({
+    container: $("cy"), elements: { nodes, edges }, style: styles,
+    layout: { name: "preset" },   // honor the computed DAG positions
+    minZoom: 0.04, maxZoom: 4,
+    wheelSensitivity: 0.2,
+  });
   wireEvents();
-  cy.fit(undefined, 40);
+  cy.fit(undefined, 60);
 }
 
 function wireEvents() {
@@ -233,7 +245,15 @@ function setView(v) {
   $("view-dag").classList.toggle("on", v === "dag");
   $("view-force").classList.toggle("on", v === "force");
   if (v === "dag") loadGraph();
-  else cy.layout({ name: "cose", animate: true, nodeRepulsion: 8000, idealEdgeLength: 90 }).run();
+  else {
+    cy.nodes().style("font-size", 7);
+    cy.layout({
+      name: "cose", animate: true, animationDuration: 700,
+      nodeRepulsion: 24000, idealEdgeLength: 220, edgeElasticity: 90,
+      gravity: 0.25, numIter: 1500, randomize: true,
+    }).run();
+    cy.one("layoutstop", () => cy.fit(undefined, 80));
+  }
 }
 
 $("repo").addEventListener("change", () => {

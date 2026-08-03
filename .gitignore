@@ -11,3 +11,6 @@ __pycache__/
 .hook.log
 proof_out.txt
 frame_*.png
+.serve.log
+demo/mock-repo/
+.gstack/

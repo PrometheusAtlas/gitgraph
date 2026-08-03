@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from db import get_driver
@@ -16,6 +17,15 @@ ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "static"
 
 app = FastAPI(title="gitgraph")
+
+class NoCache(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+app.add_middleware(NoCache)
 
 WRITE_RE = re.compile(
     r"\b(CREATE|MERGE|DELETE|DETACH|REMOVE|SET|DROP|ALTER|RENAME|LOAD|CALL\s+db\.|"
@@ -37,7 +47,8 @@ def repos():
     with driver().session() as s:
         rows = s.run("""
             MATCH (r:Repo)-[:CONTAINS]->(c:Commit)
-            OPTIONAL MATCH (b:Branch {remote: 'local'})-[:POINTS_TO]->(:Commit)
+            OPTIONAL MATCH (b:Branch {remote: 'local'})-[:POINTS_TO]->()
+            WHERE b IS NULL OR b.repo = r.name
             WITH r, count(DISTINCT c) AS commits, collect(DISTINCT b.name) AS branches
             RETURN r.name AS name, r.path AS path, commits, branches
             ORDER BY commits DESC

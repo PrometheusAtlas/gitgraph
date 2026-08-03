@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>gitgraph — your repositories, as a queryable graph</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">git<span class="accent">graph</span></div>
+  <select id="repo"></select>
+  <select id="branch"><option value="">all branches</option></select>
+  <div class="seg" id="viewseg">
+    <button id="view-dag" class="on">DAG</button>
+    <button id="view-force">Force</button>
+  </div>
+  <input id="search" type="search" placeholder="search hash / message / author…">
+  <button id="statsbtn">Stats</button>
+</header>
+
+<main>
+  <div id="cy"></div>
+  <div id="tooltip" hidden></div>
+  <aside id="panel" hidden>
+    <button id="panel-close">&times;</button>
+    <div id="panel-body"></div>
+  </aside>
+</main>
+
+<section id="querybar">
+  <select id="namedq"></select>
+  <button id="runq">Run</button>
+  <input id="branchq" placeholder="branch (some queries)">
+  <span class="sep">|</span>
+  <input id="rawq" placeholder="raw Cypher — read-only (MATCH/RETURN)">
+  <button id="runraw">Query</button>
+</section>
+<div id="results" hidden></div>
+
+<script src="/static/vendor/cytoscape.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+# neo4j
+.venv/
+.env
+neo4j_data/
+
+# python
+__pycache__/
+*.py[cod]
+
+# scratch
+.hook.log
+proof_out.txt
+frame_*.png

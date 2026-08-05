@@ -98,3 +98,10 @@ main { flex: 1; position: relative; min-height: 0; }
 .search-pop div:hover { background: var(--panel2); }
 .search-pop .s-msg { color: var(--text); }
 .search-pop .s-meta { color: var(--dim); font-size: 11px; }
+
+#hint {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+  background: rgba(18, 18, 26, 0.85); border: 1px solid var(--border);
+  border-radius: 20px; padding: 5px 14px; font-size: 11px; color: var(--dim);
+  pointer-events: none; z-index: 10;
+}

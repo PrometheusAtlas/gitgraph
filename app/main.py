@@ -56,22 +56,61 @@ def repos():
     return rows
 
 @app.get("/api/graph")
-def graph(repo: str, branch: str = "", limit: int = 2000):
+def graph(repo: str, branch: str = "", limit: int = 2500):
     with driver().session() as s:
-        commits = s.run(f"""
-            MATCH (r:Repo {{name: $repo}})-[:CONTAINS]->(c:Commit)
+        # the SHAPE of the repo: every merge, every branch/tag tip, and a
+        # stride-sampled trunk — not just the newest slice
+        all_commits = s.run("""
+            MATCH (r:Repo {name: $repo})-[:CONTAINS]->(c:Commit)
+            RETURN c.hash AS hash, c.merged AS merged
+        """, repo=repo).data()
+        tip_hashes = set()
+        for t in s.run("""
+            MATCH (b:Branch {repo: $repo})-[:POINTS_TO]->(tip)
+            MATCH (t:Tag {repo: $repo})-[:POINTS_TO]->(ttip)
+            RETURN tip.hash AS h UNION
+            MATCH (t:Tag {repo: $repo})-[:POINTS_TO]->(ttip)
+            RETURN ttip.hash AS h
+        """, repo=repo).data():
+            tip_hashes.add(t["h"])
+
+        # order all commits oldest -> newest for even stride sampling
+        chrono = s.run("""
+            MATCH (r:Repo {name: $repo})-[:CONTAINS]->(c:Commit)
+            RETURN c.hash AS hash, c.merged AS merged
+            ORDER BY c.authored_at ASC
+        """, repo=repo).data()
+
+        merges = [c for c in chrono if c["merged"]]
+        trunk = [c for c in chrono if not c["merged"]]
+        sample = set(tip_hashes)
+        # all tips + a balanced mix: ~45% merges, rest stride-sampled trunk
+        remaining = limit - len(sample)
+        merge_cap = max(0, int(remaining * 0.45))
+        merge_stride = max(1, len(merges) // merge_cap) if merge_cap else 10 ** 9
+        for i in range(0, len(merges), merge_stride):
+            if len(sample) >= limit:
+                break
+            sample.add(merges[i]["hash"])
+        remaining = limit - len(sample)
+        trunk_stride = max(1, len(trunk) // remaining) if remaining > 0 else 10 ** 9
+        for i in range(0, len(trunk), trunk_stride):
+            if len(sample) >= limit:
+                break
+            sample.add(trunk[i]["hash"])
+
+        commits = s.run("""
+            MATCH (c:Commit)
+            WHERE c.hash IN $hashes
             RETURN c.hash AS hash, c.msg AS msg, c.author_name AS author,
                    c.authored_at AS date, c.merged AS merged,
                    c.additions AS add, c.deletions AS del,
                    c.files_changed AS files
             ORDER BY c.authored_at DESC
-            LIMIT $limit
-        """, repo=repo, limit=limit).data()
-        hashes = [c["hash"] for c in commits]
-        hash_set = set(hashes)
+        """, hashes=list(sample)).data()
+        hash_set = {c["hash"] for c in commits}
 
-        # branch membership via a plain Python BFS over the parent edges —
-        # Cypher variable-length paths explode with merges, this does not
+        # branch membership via a plain Python BFS over the parent edges
         edges = s.run("""
             MATCH (r:Repo {name: $repo})-[:CONTAINS]->(c:Commit)-[:PARENT]->(p:Commit)
             RETURN c.hash AS c, p.hash AS p
@@ -86,19 +125,47 @@ def graph(repo: str, branch: str = "", limit: int = 2000):
 
         order = ["main", "master", "develop"]
         tips.sort(key=lambda b: (order.index(b["name"]) if b["name"] in order else 99, b["name"]))
-        branch_of = {}
+        # each commit joins the branch whose tip is CLOSEST to it — historical
+        # branches keep their own lanes instead of everything collapsing onto main
+        best_branch = {}
+        best_depth = {}
         for b in tips:
-            stack, seen = [b["tip"]], set()
+            stack, seen = [(b["tip"], 0)], set()
             while stack:
-                h = stack.pop()
+                h, depth = stack.pop()
                 if h in seen:
                     continue
                 seen.add(h)
-                if h in hash_set and h not in branch_of:
-                    branch_of[h] = b["name"]
+                if h in hash_set and (h not in best_depth or depth < best_depth[h]):
+                    best_depth[h] = depth
+                    best_branch[h] = b["name"]
                 for p in child.get(h, []):
                     if p not in seen:
-                        stack.append(p)
+                        stack.append((p, depth + 1))
+        branch_of = best_branch
+
+        # topological depth over the FULL graph via Kahn's algorithm
+        # (O(V+E) — a naive relaxation re-pushes merges and takes minutes)
+        from collections import deque as _deque
+        nodes = set(child.keys())
+        for ps in child.values():
+            nodes.update(ps)
+        children_of = {}
+        for c, ps in child.items():
+            for p in ps:
+                children_of.setdefault(p, []).append(c)
+        indeg = {n: len(child.get(n, [])) for n in nodes}
+        queue = _deque(n for n in nodes if indeg[n] == 0)
+        level = {n: 0 for n in nodes}
+        while queue:
+            n = queue.popleft()
+            for c in children_of.get(n, []):
+                if level[c] < level[n] + 1:
+                    level[c] = level[n] + 1
+                indeg[c] -= 1
+                if indeg[c] == 0:
+                    queue.append(c)
+        max_level = max(level.values()) if level else 0
 
         # optional branch scope: the ancestry set of one branch
         scope = None
@@ -136,6 +203,8 @@ def graph(repo: str, branch: str = "", limit: int = 2000):
             "add": c["add"], "del": c["del"], "files": c["files"],
             "branch": branch_of.get(c["hash"], ""),
             "tags": tags.get(c["hash"], []),
+            "level": level.get(c["hash"], 0),
+            "tip": best_depth.get(c["hash"], 999) == 0,
         })
     in_set = {n["id"] for n in nodes}
     with driver().session() as s:
@@ -144,7 +213,7 @@ def graph(repo: str, branch: str = "", limit: int = 2000):
             WHERE c.hash IN $hashes AND p.hash IN $hashes
             RETURN c.hash AS source, p.hash AS target
         """, hashes=list(in_set)).data() if in_set else []
-    return {"nodes": nodes, "edges": edges}
+    return {"nodes": nodes, "edges": edges, "maxLevel": max_level}
 
 @app.get("/api/node/{hash}")
 def node(hash: str):

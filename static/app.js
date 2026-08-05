@@ -61,30 +61,36 @@ async function loadBranches() {
 
 /* ---------------- 3D graph ---------------- */
 
-function layout3d(nodes, edges) {
-  // levels: distance from the tip set (newest = level 0)
-  const child = new Map();
-  for (const e of edges) (child.get(e.target) ?? child.set(e.target, []).get(e.target)).push(e.source);
+function layout3d(nodes, edges, maxLevelGiven) {
+  // levels: distance from the tip set (newest = level 0). Use the server's
+  // full-graph levels when present (sampled subgraphs lose connectivity).
   const level = new Map();
-  const ids = new Set(nodes.map((n) => n.id));
-  const tips = nodes.filter((n) => !child.get(n.id)?.length);
-  const stack = tips.map((t) => t.id);
-  for (const t of stack) level.set(t, 0);
-  while (stack.length) {
-    const id = stack.pop();
-    const l = level.get(id) ?? 0;
-    for (const e of edges) {
-      if (e.source !== id) continue;
-      if (!ids.has(e.target)) continue;
-      if (!level.has(e.target) || level.get(e.target) < l + 1) {
-        level.set(e.target, l + 1);
-        stack.push(e.target);
+  if (maxLevelGiven != null && nodes.some((n) => typeof n.level === "number")) {
+    for (const n of nodes) level.set(n.id, n.level ?? 0);
+  } else {
+    const child = new Map();
+    for (const e of edges) (child.get(e.target) ?? child.set(e.target, []).get(e.target)).push(e.source);
+    const ids = new Set(nodes.map((n) => n.id));
+    const tips = nodes.filter((n) => !child.get(n.id)?.length);
+    const stack = tips.map((t) => t.id);
+    for (const t of stack) level.set(t, 0);
+    while (stack.length) {
+      const id = stack.pop();
+      const l = level.get(id) ?? 0;
+      for (const e of edges) {
+        if (e.source !== id) continue;
+        if (!ids.has(e.target)) continue;
+        if (!level.has(e.target) || level.get(e.target) < l + 1) {
+          level.set(e.target, l + 1);
+          stack.push(e.target);
+        }
       }
     }
   }
-  const maxLevel = Math.max(0, ...level.values());
+  const maxLevel = maxLevelGiven != null ? maxLevelGiven : Math.max(0, ...level.values());
 
-  // structured space: time on X, branches on Y, authors on Z
+  // structured space: time on X, branches on Y, authors on Z.
+  // author planes only when the team is small — beyond that it's noise
   const order = ["main", "master", "develop"];
   const branches = [...new Set(nodes.map((n) => n.branch).filter(Boolean))];
   branches.sort((a, b) => {
@@ -92,15 +98,16 @@ function layout3d(nodes, edges) {
     return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
   });
   const authors = [...new Set(nodes.map((n) => n.author).filter(Boolean))].sort();
+  const useAuthorZ = authors.length <= 12;
   const bLane = new Map(branches.map((b, i) => [b, i]));
   const aLane = new Map(authors.map((a, i) => [a, i]));
-  const HS = 100, BS = 150, AS = 180;
+  const HS = 60, BS = 90, AS = 110;
   const pos = new Map(nodes.map((n) => [n.id, {
     x: (maxLevel - (level.get(n.id) ?? 0)) * HS,
     y: ((bLane.get(n.branch) ?? 0) - (branches.length - 1) / 2) * BS,
-    z: ((aLane.get(n.author) ?? 0) - (authors.length - 1) / 2) * AS,
+    z: useAuthorZ ? ((aLane.get(n.author) ?? 0) - (authors.length - 1) / 2) * AS : 0,
   }]));
-  return { pos, maxLevel, branches, authors };
+  return { pos, maxLevel, branches, authors, useAuthorZ };
 }
 
 const Graph = ForceGraph3D()(document.getElementById("cy"))
@@ -113,8 +120,9 @@ const Graph = ForceGraph3D()(document.getElementById("cy"))
     `+${n.add ?? "?"} −${n.del ?? "?"} · ${n.files ?? "?"} files` +
     (n.merged ? " · MERGE" : "") + (n.branch ? ` · ${esc(n.branch)}` : "") +
     `<br>${n.id.slice(0, 12)}…`)
-  .linkColor(() => "#4a4a5c")
-  .linkWidth(1.2)
+  .linkColor(() => "#6b7ba0")
+  .linkOpacity(0.55)
+  .linkWidth(2)
   .linkDirectionalParticles(2)
   .linkDirectionalParticleWidth(2)
   .linkDirectionalParticleColor((l) => (l.source && l.source.color) || "#7ab8ff")
@@ -128,10 +136,14 @@ const Graph = ForceGraph3D()(document.getElementById("cy"))
   .nodeThreeObject((n) => {
     const THREE = window.THREE;
     const group = new THREE.Group();
+    // merges and ref tips are the landmarks; trunk commits stay small so the
+    // edge chain reads as the visible line, not a fog of dots
+    const big = n.merged || n.tip;
     const sphere = new THREE.Mesh(
-      new THREE.SphereGeometry(n.merged ? 4.6 : 3.4, 16, 16),
+      new THREE.SphereGeometry(big ? 5.4 : 1.7, 14, 14),
       new THREE.MeshLambertMaterial({ color: n.color }));
     group.add(sphere);
+    if (window.__nodeCount && window.__nodeCount > 400) return group;  // no label clutter at scale
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
     const text = n.msg.slice(0, 26);
@@ -172,10 +184,13 @@ async function loadGraph() {
     merged: n.merged,
     tags: n.tags,
     add: n.add, del: n.del, files: n.files,
+    level: n.level,
+    tip: n.tip,
     color: authorColor(n.author || "?"),
   }));
   const links = data.edges.map((e) => ({ source: e.target, target: e.source }));
-  const L = layout3d(nodes, links);
+  window.__nodeCount = nodes.length;
+  const L = layout3d(nodes, links, data.maxLevel);
 
   // deterministic structured space: time on X, branches on Y, authors on Z.
   // preset coordinates + d3AlphaDecay(1) means the sim never pulls it apart.
@@ -186,13 +201,18 @@ async function loadGraph() {
 
   Graph.graphData({ nodes, links });
 
-  // frame the space from a 3/4 angle immediately (positions are preset, so
-  // there's nothing to wait for) — you're in the space, not staring at its center
-  const xs = nodes.map((n) => L.pos.get(n.id).x);
-  const maxX = Math.max(...xs);
-  Graph.cameraPosition(
-    { x: maxX * 0.55, y: -maxX * 0.42, z: maxX * 0.62 },
-    { x: maxX * 0.45, y: 0, z: 0 }, 900);
+  // frame from a 3/4 angle AFTER the sim's centering tick settles, using the
+  // live positions (the sim shifts everything by the mean). For big graphs the
+  // distance is capped so you land readable near the newest commits.
+  setTimeout(() => {
+    const live = Graph.graphData().nodes.map((n) => n.x);
+    const maxX = Math.max(...live), minX = Math.min(...live);
+    const span = maxX - minX;
+    const dist = Math.min(span * 0.62, 26000);
+    Graph.cameraPosition(
+      { x: maxX - dist * 0.4, y: -dist * 0.3, z: dist * 0.5 },
+      { x: maxX - dist * 0.08, y: 0, z: 0 }, 900);
+  }, 80);
 
   renderLegend(L.authors, nodes);
 }
@@ -215,9 +235,14 @@ function renderLegend(authors, nodes) {
 const ctrl = Graph.controls();
 ctrl.enableDamping = true;
 ctrl.dampingFactor = 0.08;
+ctrl.enablePan = true;               // right-drag to pan
 ctrl.autoRotate = true;
 ctrl.autoRotateSpeed = 0.5;
 ctrl.addEventListener("start", () => { ctrl.autoRotate = false; });
+const hint = document.createElement("div");
+hint.id = "hint";
+hint.textContent = "drag rotate · right-drag pan · wheel zoom · click a node for details";
+document.getElementById("cy").appendChild(hint);
 
 /* ---------------- commit panel ---------------- */
 

@@ -88,6 +88,12 @@ def _consume_file_line(commit, fl):
             commit["additions"] += int(parts[0])
         if parts[1].isdigit():
             commit["deletions"] += int(parts[1])
+    elif len(parts) == 1:
+        path = parts[0]
+        if " => " in path:
+            path = path.split(" => ")[-1]
+        commit["files"].append(path)
+        commit["files_changed"] += 1
 
 def parse_bodies(text):
     """Parse `git log --format=%H\x1f%b` output into {hash: body}.
@@ -128,13 +134,16 @@ def batched(rows, n=500):
     for i in range(0, len(rows), n):
         yield rows[i:i + n]
 
-def import_repo(path, with_files=False):
+def import_repo(path, with_files=False, no_stats=False):
     path = Path(path).expanduser().resolve()
     if not (path / ".git").exists():
         raise RuntimeError(f"not a git repository: {path}")
 
     print(f"== importing {path} ==")
-    text = run_git(path, "log", "--all", f"--format={FMT_A}", "--numstat")
+    if no_stats:
+        text = run_git(path, "log", "--all", f"--format={FMT_A}", "--name-only")
+    else:
+        text = run_git(path, "log", "--all", f"--format={FMT_A}", "--numstat")
     commits = parse_commits(text)
     if not commits:
         print("  no commits found")
@@ -240,9 +249,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("path")
     ap.add_argument("--with-files", action="store_true")
+    ap.add_argument("--no-stats", action="store_true",
+                    help="skip diff stats (fast on large / blobless clones)")
     args = ap.parse_args()
     try:
-        import_repo(args.path, args.with_files)
+        import_repo(args.path, args.with_files, args.no_stats)
     except RuntimeError as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)

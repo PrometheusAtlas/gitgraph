@@ -37,7 +37,7 @@ def fmt_table(records):
 
 def cmd_import(args):
     from importer import import_repo
-    import_repo(args.path, args.with_files)
+    import_repo(args.path, args.with_files, args.no_stats)
 
 def cmd_stats(_):
     if not wait_ready():
@@ -119,6 +119,7 @@ def main():
     p = sub.add_parser("import", help="import a repo")
     p.add_argument("path")
     p.add_argument("--with-files", action="store_true")
+    p.add_argument("--no-stats", action="store_true", help="skip diff stats (fast on large/blobless clones)")
     p.set_defaults(fn=cmd_import)
     sub.add_parser("stats", help="graph summary").set_defaults(fn=cmd_stats)
     p = sub.add_parser("query", help="run Cypher or a named query")

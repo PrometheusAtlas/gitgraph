@@ -185,27 +185,30 @@ async function loadGraph() {
   }
 
   Graph.graphData({ nodes, links });
-  Graph.onEngineStop(() => {
-    // frame the space from a 3/4 angle — you're in the space, not staring at its center
-    const xs = nodes.map((n) => L.pos.get(n.id).x);
-    const maxX = Math.max(...xs);
-    Graph.cameraPosition(
-      { x: maxX * 0.55, y: -maxX * 0.42, z: maxX * 0.62 },
-      { x: maxX * 0.45, y: 0, z: 0 }, 900);
-  });
+
+  // frame the space from a 3/4 angle immediately (positions are preset, so
+  // there's nothing to wait for) — you're in the space, not staring at its center
+  const xs = nodes.map((n) => L.pos.get(n.id).x);
+  const maxX = Math.max(...xs);
+  Graph.cameraPosition(
+    { x: maxX * 0.55, y: -maxX * 0.42, z: maxX * 0.62 },
+    { x: maxX * 0.45, y: 0, z: 0 }, 900);
+
   renderLegend(L.authors, nodes);
 }
 
 function renderLegend(authors, nodes) {
   const counts = {};
   for (const n of nodes) counts[n.author] = (counts[n.author] || 0) + 1;
+  const top = authors.slice().sort((a, b) => (counts[b] ?? 0) - (counts[a] ?? 0)).slice(0, 15);
   const box = $("legend");
-  box.innerHTML = authors.length
-    ? authors.map((a) =>
+  box.innerHTML = top.length
+    ? top.map((a) =>
         `<div class="lg-row"><span class="lg-dot" style="background:${authorColor(a)}"></span>` +
-        `${esc(a)}<span class="lg-count">${counts[a] ?? 0}</span></div>`).join("")
+        `${esc(a)}<span class="lg-count">${counts[a] ?? 0}</span></div>`).join("") +
+      (authors.length > top.length ? `<div class="lg-row" style="color:var(--dim)">+${authors.length - top.length} more</div>` : "")
     : '<div class="lg-row" style="color:var(--dim)">no authors</div>';
-  box.hidden = !authors.length;
+  box.hidden = !top.length;
 }
 
 // smooth camera: damping + a gentle drift that stops the moment you interact

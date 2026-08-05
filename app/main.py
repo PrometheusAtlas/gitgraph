@@ -58,43 +58,64 @@ def repos():
 @app.get("/api/graph")
 def graph(repo: str, branch: str = "", limit: int = 2000):
     with driver().session() as s:
-        scope = None
-        if branch:
-            scope = set(s.run("""
-                MATCH (b:Branch {repo: $repo, name: $branch, remote: 'local'})-[:POINTS_TO]->(tip)
-                MATCH (tip)-[:PARENT*0..]->(c:Commit)
-                RETURN collect(c.hash) AS hashes
-            """, repo=repo, branch=branch).single()["hashes"])
-        params = {"repo": repo, "limit": limit}
-        extra = "WHERE c.hash IN $scope" if scope else ""
-        if scope:
-            params["scope"] = list(scope)
         commits = s.run(f"""
             MATCH (r:Repo {{name: $repo}})-[:CONTAINS]->(c:Commit)
-            {extra}
             RETURN c.hash AS hash, c.msg AS msg, c.author_name AS author,
                    c.authored_at AS date, c.merged AS merged,
                    c.additions AS add, c.deletions AS del,
                    c.files_changed AS files
             ORDER BY c.authored_at DESC
             LIMIT $limit
-        """, **params).data()
+        """, repo=repo, limit=limit).data()
         hashes = [c["hash"] for c in commits]
+        hash_set = set(hashes)
+
+        # branch membership via a plain Python BFS over the parent edges —
+        # Cypher variable-length paths explode with merges, this does not
         edges = s.run("""
-            MATCH (c:Commit)-[:PARENT]->(p:Commit)
-            WHERE c.hash IN $hashes AND p.hash IN $hashes
-            RETURN c.hash AS source, p.hash AS target
-        """, hashes=hashes).data()
-        branch_sets = {}
-        for b in s.run("""
+            MATCH (r:Repo {name: $repo})-[:CONTAINS]->(c:Commit)-[:PARENT]->(p:Commit)
+            RETURN c.hash AS c, p.hash AS p
+        """, repo=repo).data()
+        child = {}
+        for e in edges:
+            child.setdefault(e["c"], []).append(e["p"])
+        tips = s.run("""
             MATCH (b:Branch {repo: $repo, remote: 'local'})-[:POINTS_TO]->(tip)
             RETURN b.name AS name, tip.hash AS tip
-        """, repo=repo).data():
-            anc = s.run("""
-                MATCH (tip:Commit {hash: $tip})-[:PARENT*0..]->(c:Commit)
-                RETURN collect(c.hash) AS hashes
-            """, tip=b["tip"]).single()["hashes"]
-            branch_sets[b["name"]] = set(anc)
+        """, repo=repo).data()
+
+        order = ["main", "master", "develop"]
+        tips.sort(key=lambda b: (order.index(b["name"]) if b["name"] in order else 99, b["name"]))
+        branch_of = {}
+        for b in tips:
+            stack, seen = [b["tip"]], set()
+            while stack:
+                h = stack.pop()
+                if h in seen:
+                    continue
+                seen.add(h)
+                if h in hash_set and h not in branch_of:
+                    branch_of[h] = b["name"]
+                for p in child.get(h, []):
+                    if p not in seen:
+                        stack.append(p)
+
+        # optional branch scope: the ancestry set of one branch
+        scope = None
+        if branch:
+            scope = set()
+            stack = [next((b["tip"] for b in tips if b["name"] == branch), "")]
+            seen = set()
+            while stack:
+                h = stack.pop()
+                if not h or h in seen:
+                    continue
+                seen.add(h)
+                scope.add(h)
+                for p in child.get(h, []):
+                    if p not in seen:
+                        stack.append(p)
+
         tags = {}
         for t in s.run("""
             MATCH (t:Tag {repo: $repo})-[:POINTS_TO]->(c:Commit)
@@ -102,11 +123,10 @@ def graph(repo: str, branch: str = "", limit: int = 2000):
         """, repo=repo).data():
             tags.setdefault(t["hash"], []).append(t["name"])
 
-    order = ["main", "master", "develop"]
-    branch_names = [b for b in branch_sets if b not in order] + [b for b in order if b in branch_sets]
     nodes = []
     for c in commits:
-        owned = next((b for b in branch_names if c["hash"] in branch_sets.get(b, set())), "")
+        if scope is not None and c["hash"] not in scope:
+            continue
         nodes.append({
             "id": c["hash"],
             "msg": c["msg"],
@@ -114,9 +134,16 @@ def graph(repo: str, branch: str = "", limit: int = 2000):
             "date": c["date"],
             "merged": bool(c["merged"]),
             "add": c["add"], "del": c["del"], "files": c["files"],
-            "branch": owned,
+            "branch": branch_of.get(c["hash"], ""),
             "tags": tags.get(c["hash"], []),
         })
+    in_set = {n["id"] for n in nodes}
+    with driver().session() as s:
+        edges = s.run("""
+            MATCH (c:Commit)-[:PARENT]->(p:Commit)
+            WHERE c.hash IN $hashes AND p.hash IN $hashes
+            RETURN c.hash AS source, p.hash AS target
+        """, hashes=list(in_set)).data() if in_set else []
     return {"nodes": nodes, "edges": edges}
 
 @app.get("/api/node/{hash}")
